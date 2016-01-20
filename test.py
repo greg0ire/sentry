@@ -33,6 +33,14 @@ pprint(
     tsdb.get_most_frequent(
         tsdb.models.projects_by_organization,
         (1, 2, 3),
+        timezone.now() - timedelta(minutes=30),
+    )
+)
+
+pprint(
+    tsdb.get_most_frequent(
+        tsdb.models.projects_by_organization,
+        (1, 2, 3),
         timezone.now() - timedelta(hours=3),
     )
 )
