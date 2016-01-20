@@ -472,10 +472,6 @@ return Router:new({
         function (sketches, arguments)
             local limit = unpack(arguments)
 
-            -- TODO: Allow using different aggregate methods, including an
-            -- aggregator that just returns the series.
-            local aggregate = sum
-
             -- We only care about sketches that actually exist.
             sketches = filter(
                 function (sketch)
@@ -532,7 +528,7 @@ return Router:new({
                         results,
                         {
                             value,
-                            aggregate(
+                            sum(
                                 map(
                                     function (sketch)
                                         return sketch:estimate(value)
