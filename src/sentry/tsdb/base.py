@@ -50,9 +50,10 @@ class TSDBModel(Enum):
 
     # distinct count of users that have been affected by an event in a group
     users_affected_by_group = 300
-
     # distinct count of users that have been affected by an event in a project
     users_affected_by_project = 301
+
+    projects_by_organization = 402
 
 
 class BaseTSDB(object):

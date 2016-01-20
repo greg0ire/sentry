@@ -7,11 +7,15 @@ sentry.tsdb.redis
 """
 from __future__ import absolute_import
 
+import operator
 import logging
 import six
 
 from binascii import crc32
-from collections import defaultdict
+from collections import (
+    defaultdict,
+    namedtuple,
+)
 from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
@@ -22,11 +26,15 @@ from sentry.utils.dates import to_timestamp
 from sentry.utils.redis import (
     check_cluster_versions,
     make_rb_cluster,
+    load_script,
 )
 from sentry.utils.versioning import Version
 
 
 logger = logging.getLogger(__name__)
+
+
+SketchParameters = namedtuple('SketchParameters', 'depth width capacity')
 
 
 class RedisTSDB(BaseTSDB):
@@ -66,6 +74,8 @@ class RedisTSDB(BaseTSDB):
         }
 
     """
+    cmsketch = staticmethod(load_script('tsdb/cmsketch.lua'))
+
     def __init__(self, hosts=None, prefix='ts:', vnodes=64, **kwargs):
         # inherit default options from REDIS_OPTIONS
         defaults = settings.SENTRY_REDIS_OPTIONS
@@ -260,3 +270,99 @@ class RedisTSDB(BaseTSDB):
                 responses[key] = client.target_key(key).execute_command('PFCOUNT', *ks)
 
         return {key: value.value for key, value in responses.iteritems()}
+
+    def get_sketch_parameters(self, model):
+        return SketchParameters(3, 128, 50)
+
+    def make_frequency_table_keys(self, model, rollup, timestamp, key):
+        prefix = self.make_distinct_counter_key(model, rollup, timestamp, key)
+        return map(
+            operator.methodcaller('format', prefix),
+            ('{}:c', '{}:i', '{}:e'),
+        )
+
+    def record_frequency_multi(self, requests, timestamp=None):
+        if timestamp is None:
+            timestamp = timezone.now()
+
+        ts = int(to_timestamp(timestamp))  # ``timestamp`` is not actually a timestamp :(
+
+        for model, request in requests:
+            for key, items in request.iteritems():
+                client = self.cluster.get_local_client_for_key(key)
+
+                expirations = {}
+                keys = []
+                for rollup, max_values in self.rollups:
+                    chunk = self.make_frequency_table_keys(model, rollup, ts, key)
+                    keys.extend(chunk)
+
+                    expiry = self.calculate_expiry(rollup, max_values, timestamp)
+                    for k in chunk:
+                        expirations[k] = expiry
+
+                args = ['incr'] + list(self.get_sketch_parameters(model))
+                for member, score in items.items():
+                    args.extend((score, member))
+
+                self.cmsketch(client, keys, args)
+
+                for key, expiry in expirations.items():
+                    client.expireat(key, expiry)
+
+    def get_most_frequent(self, model, keys, start, end=None, rollup=None):
+        rollup, series = self.get_optimal_rollup_series(start, end, rollup)
+
+        responses = {}
+        for key in keys:
+            ks = []
+            for timestamp in series:
+                ks.extend(self.make_frequency_table_keys(model, rollup, timestamp, key))
+
+            responses[key] = self.cmsketch(
+                self.cluster.get_local_client_for_key(key),
+                ks,
+                ('ranked',) + self.get_sketch_parameters(model)
+            )
+
+        return responses
+
+    def get_frequency_series(self, model, items, start, end=None, rollup=None):
+        rollup, series = self.get_optimal_rollup_series(start, end, rollup)
+
+        responses = {}
+        for key, members in items.iteritems():
+            ks = []
+            for timestamp in series:
+                ks.extend(self.make_frequency_table_keys(model, rollup, timestamp, key))
+
+            members = tuple(members)  # freeze ordering
+            args = ('estimate',) + self.get_sketch_parameters(model) + members
+
+            results = zip(
+                series,
+                self.cmsketch(
+                    self.cluster.get_local_client_for_key(key),
+                    ks,
+                    args,
+                )
+            )
+
+            response = responses[key] = []
+            for timestamp, values in results:
+                response.append(
+                    (timestamp, dict(zip(members, map(float, values))))
+                )
+
+        return responses
+
+    def get_frequency_totals(self, model, items, start, end=None, rollup=None):
+        responses = {}
+
+        for key, series in self.get_frequency_series(model, items, start, end, rollup).iteritems():
+            response = responses[key] = {}
+            for timestamp, results in series:
+                for member, value in results.items():
+                    response[member] = response.get(member, 0.0) + value
+
+        return responses
