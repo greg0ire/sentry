@@ -468,6 +468,10 @@ return Router:new({
         function (sketches, arguments)
             local limit = unpack(arguments)
 
+            -- TODO: Allow using different aggregate methods, including an
+            -- aggregator that just returns the series.
+            local aggregate = sum
+
             -- We only care about sketches that actually exist.
             sketches = filter(
                 function (sketch)
@@ -494,57 +498,70 @@ return Router:new({
                 )
             end
 
-            -- TODO: Allow using different aggregate methods, including an
-            -- aggregator that just returns the series.
-            local aggregate = sum
-
-            local items = {}
-            for _, sketch in pairs(sketches) do
-                local members = redis.call('ZRANGE', sketch.index, 0, -1)
-                for _, member in pairs(members) do
-                    items[member] = true
+            if #sketches == 1 then
+                local results = {}
+                local members = redis.call('ZREVRANGE', sketches[1].index, 0, limit, 'WITHSCORES')
+                for i=1, #members, 2 do
+                    table.insert(
+                        results,
+                        {
+                            members[i],
+                            string.format('%s', members[i + 1])
+                        }
+                    )
                 end
-            end
+                return results
+            else
+                -- As the first pass, we need to find all of the items to look
+                -- up in all sketches.
+                local items = {}
+                for _, sketch in pairs(sketches) do
+                    local members = redis.call('ZRANGE', sketch.index, 0, -1)
+                    for _, member in pairs(members) do
+                        items[member] = true
+                    end
+                end
 
-            local results = {}
-            for value in pairs(items) do
-                table.insert(
-                    results,
-                    {
-                        value,
-                        aggregate(
-                            map(
-                                function (sketch)
-                                    return sketch:estimate(value)
-                                end,
-                                sketches
-                            )
-                        ),
+                local results = {}
+                for value in pairs(items) do
+                    table.insert(
+                        results,
+                        {
+                            value,
+                            aggregate(
+                                map(
+                                    function (sketch)
+                                        return sketch:estimate(value)
+                                    end,
+                                    sketches
+                                )
+                            ),
+                        }
+                    )
+                end
+
+                local function comparator(x, y)
+                    if x[2] == y[2] then
+                        return x[1] < y[1]  -- lexicographically by key ascending
+                    else
+                        return x[2] > y[2]  -- score descending
+                    end
+                end
+
+                table.sort(results, comparator)
+
+                -- Trim the results to the limit.
+                local trimmed = {}
+                for i = 1, math.min(limit, #results) do
+                    local item, score = unpack(results[i])
+                    trimmed[i] = {
+                        item,
+                        string.format('%s', score)
                     }
-                )
-            end
-
-            local function comparator(x, y)
-                if x[2] == y[2] then
-                    return x[1] < y[1]  -- lexicographically by key ascending
-                else
-                    return x[2] > y[2]  -- score descending
                 end
+
+                return trimmed
             end
-
-            table.sort(results, comparator)
-
-            -- Trim the results to the limit.
-            local trimmed = {}
-            for i = 1, math.min(limit, #results) do
-                local item, score = unpack(results[i])
-                trimmed[i] = {
-                    item,
-                    string.format('%s', score)
-                }
-            end
-
-            return trimmed
         end,
         true
     )
