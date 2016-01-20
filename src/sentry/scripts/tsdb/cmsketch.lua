@@ -57,6 +57,16 @@ To query the top 5 items from the first sketch:
 
 --[[ Helpers ]]--
 
+local function filter(f, t)
+    local result = {}
+    for i, value in ipairs(t) do
+        if f(value) then
+            table.insert(result, value)
+        end
+    end
+    return result
+end
+
 local function map(f, t)
     local result = {}
     for i, value in ipairs(t) do
@@ -172,17 +182,24 @@ end
 
 local Configuration = {}
 
-function Configuration:new(key, defaults, readonly)
+function Configuration:new(key, readonly, defaults)
     self.__index = self
     return setmetatable({
         key = key,
+        readonly = readonly,
         defaults = defaults,
-        readonly = readonly
+        data = nil,
+        loaded = false
     }, self)
 end
 
-function Configuration:get(key)
-    if self.data == nil then
+function Configuration:exists()
+    self:load()
+    return self.data ~= nil
+end
+
+function Configuration:load()
+    if not self.loaded then
         local raw = redis.call('GET', self.key)
         if raw == false then
             self.data = self.defaults
@@ -192,7 +209,12 @@ function Configuration:get(key)
         else
             self.data = cmsgpack.unpack(raw)
         end
+        self.loaded = true
     end
+end
+
+function Configuration:get(key)
+    self:load()
     return self.data[key]
 end
 
@@ -225,9 +247,12 @@ function Sketch:observations(coordinates)
 end
 
 function Sketch:estimate(value)
-    local score = tonumber(redis.call('ZSCORE', self.index, value))
-    if score == nil then
-        score = reduce(
+    if self.configuration:exists() then
+        local score = tonumber(redis.call('ZSCORE', self.index, value))
+        if score ~= nil then
+            return score
+        end
+        return reduce(
             math.min,
             map(
                 function (c)
@@ -236,8 +261,9 @@ function Sketch:estimate(value)
                 self:coordinates(value)
             )
         )
+    else
+        return 0
     end
-    return score
 end
 
 function Sketch:increment(items)
@@ -341,21 +367,26 @@ function Command:new(fn, readonly)
     if readonly == nil then
         readonly = false
     end
+
     return function (keys, arguments)
-        local defaults, arguments = (
-            function (depth, width, index, ...)
-                return {
-                    -- TODO: Actually validate these.
-                    depth=tonumber(depth),
-                    width=tonumber(width),
-                    index=tonumber(index)
-                }, {...}
-            end
-        )(unpack(arguments))
+        local defaults = nil
+        if not readonly then
+            defaults, arguments = (
+                function (depth, width, index, ...)
+                    return {
+                        -- TODO: Actually validate these.
+                        depth=tonumber(depth),
+                        width=tonumber(width),
+                        index=tonumber(index)
+                    }, {...}
+                end
+            )(unpack(arguments))
+        end
+
         local sketches = {}
         for i = 1, #keys, 3 do
             table.insert(sketches, Sketch:new(
-                Configuration:new(keys[i], defaults, readonly),
+                Configuration:new(keys[i], readonly, defaults),
                 keys[i + 1],
                 keys[i + 2]
             ))
@@ -436,6 +467,18 @@ return Router:new({
     RANKED = Command:new(
         function (sketches, arguments)
             local limit = unpack(arguments)
+
+            -- We only care about sketches that actually exist.
+            sketches = filter(
+                function (sketch)
+                    return sketch.configuration:exists()
+                end,
+                sketches
+            )
+
+            if #sketches == 0 then
+                return {}
+            end
 
             -- TODO: There are probably a bunch of performance optimizations that could be made here.
             -- If no limit is provided, use an implicit limit of the smallest index.

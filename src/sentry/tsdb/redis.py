@@ -322,7 +322,7 @@ class RedisTSDB(BaseTSDB):
             responses[key] = self.cmsketch(
                 self.cluster.get_local_client_for_key(key),
                 ks,
-                ('ranked',) + self.get_sketch_parameters(model)
+                ('ranked',)
             )
 
         return responses
@@ -337,7 +337,7 @@ class RedisTSDB(BaseTSDB):
                 ks.extend(self.make_frequency_table_keys(model, rollup, timestamp, key))
 
             members = tuple(members)  # freeze ordering
-            args = ('estimate',) + self.get_sketch_parameters(model) + members
+            args = ('estimate',) + members
 
             results = zip(
                 series,
