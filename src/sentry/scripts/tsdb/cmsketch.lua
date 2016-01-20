@@ -23,12 +23,16 @@ The public API consists of three main methods:
 - ESTIMATE: used to query the number of times a specific item has been seen,
 - RANKED: used to query the top N items that have been recorded in a sketch.
 
-The named command to use is the first item passed as ``ARGV``, followed by the
-accuracy and storage parameters to use when initializing a new sketch:
+The named command to use is the first item passed as ``ARGV``. For commands
+that mutate data (`INCR`), the command is followed by the accuracy and storage
+parameters to use when initializing a new sketch:
 
 - DEPTH: number of rows for the estimation matrix,
 - WIDTH: number of columns for the estimation matrix,
 - CAPACITY: maximum size of the index (to disable indexing entirely, set to 0.)
+
+(Configuration parameters are not required for readonly commands such as
+`ESTIMATE` and `RANKED`.)
 
 The ``KEYS`` provided to each command are the three keys used for sketch storage:
 
@@ -51,7 +55,7 @@ sketches with depth 5, width 64 and index capacity of 50:
 
 To query the top 5 items from the first sketch:
 
-    EVALSHA $SHA 3 1:c 1:i 1:e RANKED 5 64 50 5
+    EVALSHA $SHA 3 1:c 1:i 1:e RANKED 5
 
 ]]--
 
